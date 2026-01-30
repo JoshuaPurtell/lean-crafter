@@ -3,7 +3,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Lean 4](https://img.shields.io/badge/Lean-4.27.0-orange)](https://lean-lang.org/)
 
-A web-playable Crafter game built entirely in **Lean 4**, powered by the [Lithe](https://github.com/JoshuaPurtell/lithe) web framework.
+A web-playable Crafter game built entirely in **[Lean 4](https://lean-lang.org/)**, powered by the [Lithe](https://github.com/JoshuaPurtell/lithe) web framework.
+
+> **What is Lean 4?** [Lean](https://lean-lang.org/) is a functional programming language and theorem prover developed by Microsoft Research. It combines a powerful type system with the ability to write mathematical proofs—making it possible to build software with verified correctness guarantees.
 
 ## What is this?
 
