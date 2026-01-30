@@ -1,91 +1,96 @@
 # Lean Crafter
 
-A web-playable Crafter game built entirely in **Lean 4**, served via the [Lithe](https://github.com/joshpurtell/lithe) web framework.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Lean 4](https://img.shields.io/badge/Lean-4.27.0-orange)](https://lean-lang.org/)
 
-## Overview
+A web-playable Crafter game built entirely in **Lean 4**, powered by the [Lithe](https://github.com/JoshuaPurtell/lithe) web framework.
 
-- **CrafterLean** (`src_lean4/`) — Pure Lean 4 implementation of the Crafter game engine
-- **CrafterWeb** (`lithe/`) — Lithe-based web app with HTTP API + WebSocket streaming
-- **Rust shim** (`lithe/shim/`) — Axum-based HTTP server that bridges requests into Lean
+## What is this?
 
-## Quick Start (local)
+Crafter is a 2D survival game (inspired by Minecraft) implemented as a pure functional game engine in Lean 4. This repo packages it as a web application you can play in your browser.
+
+**Tech stack:**
+- **Game engine**: Pure Lean 4 (no FFI for game logic)
+- **Web framework**: [Lithe](https://github.com/JoshuaPurtell/lithe)
+- **HTTP server**: Rust/Axum shim
+
+## Quick Start
 
 ### Prerequisites
 
 - [elan](https://github.com/leanprover/elan) (Lean version manager)
 - Rust toolchain
-- The [Lithe](https://github.com/joshpurtell/lithe) repository cloned as a sibling directory
+- [Lithe](https://github.com/JoshuaPurtell/lithe) cloned as sibling directory
 
 ### Build & Run
 
 ```bash
-# Clone lithe as sibling (if not already)
-cd /path/to/parent
+# Clone repos
 git clone https://github.com/JoshuaPurtell/lithe.git
+git clone https://github.com/JoshuaPurtell/lean-crafter.git
 
-# Build Lean code
+# Build
 cd lean-crafter/lithe
 lake build
 
-# Run the server
+# Run server
 cd shim
 cargo run
 ```
 
-Open `http://127.0.0.1:3000` in your browser.
+Open **http://127.0.0.1:3000** in your browser.
 
-### Environment Variables
+### Controls
 
-- `PORT` or `LITHE_BIND` — Bind address (default: `127.0.0.1:3000`)
-- `LITHE_APP` — App name (default: `crafter`)
+| Key | Action |
+|-----|--------|
+| Arrow keys / WASD | Move |
+| Space | Interact |
 
 ## Deploy to Railway
 
-This repo includes a `Dockerfile` for Railway deployment.
+```bash
+# Via Railway CLI
+railway login
+railway init
+railway up
+```
 
-1. Push this repo to GitHub
-2. Create a new Railway project from this repo
-3. Railway will auto-detect the Dockerfile and build
+Or connect via GitHub in the Railway dashboard.
 
-The app listens on `$PORT` (set automatically by Railway).
+## API
+
+### Create Session
+
+```http
+POST /api/sessions
+Content-Type: application/json
+
+{ "seed": 12345 }
+```
+
+### WebSocket Stream
+
+```
+WS /api/sessions/:id/stream
+
+→ { "type": "action", "action": "MoveUp" }
+← { "type": "frame", "frame": "..." }
+```
 
 ## Project Structure
 
 ```
 lean-crafter/
-├── src_lean4/           # CrafterLean — game engine in Lean 4
-│   ├── CrafterLean/     # Core modules (world, entities, actions, etc.)
+├── src_lean4/           # Game engine (Lean 4)
+│   ├── CrafterLean/     # World, entities, actions
 │   └── lakefile.toml
-├── lithe/               # CrafterWeb — Lithe web application
-│   ├── CrafterWeb.lean  # Routes, handlers, WebSocket
-│   ├── shim/            # Rust HTTP server
-│   └── lakefile.lean
-└── README.md
+├── lithe/               # Web application
+│   ├── CrafterWeb.lean  # Routes, handlers
+│   └── shim/            # Rust HTTP server
+├── Dockerfile           # Railway deployment
+└── railway.toml
 ```
-
-## API
-
-### Create session
-```
-POST /api/sessions
-Body: { "seed": 123 }
-Response: { "id": "abc123" }
-```
-
-### WebSocket stream
-```
-WS /api/sessions/:id/stream
-
-// Client → Server
-{ "type": "action", "action": "MoveUp" }
-
-// Server → Client
-{ "type": "frame", "frame": "..." }
-```
-
-### Controls
-- Arrow keys / WASD — Move
-- Space — Interact (Do action)
 
 ## License
 
