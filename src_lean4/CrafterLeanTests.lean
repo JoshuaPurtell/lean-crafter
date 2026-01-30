@@ -1,0 +1,2 @@
+import CrafterLean.Craftax.LootTests
+import CrafterLean.PropertiesTests

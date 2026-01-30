@@ -1,0 +1,453 @@
+Modular
+C ABI to tui
+
+Here’s a Lean-port spec that assumes `src_modular` is already the “shape you like”, and the goal is: (1) a “true” Crafter engine in Lean, (2) a Lean-only REPL, (3) a stable C ABI so your existing Rust TUI can embed it, and (4) optional `lean-worlds`-style `Rules` vs `OracleRules` separation for model-learning/comparison. (`lean-worlds` already ships `Server/Rules.lean`, `Server/OracleRules.lean`, and `Server/REPL.lean` in exactly that pattern. ([GitHub][1]))
+
+---
+
+## `SPEC: crafter-lean (Lean oracle core + C ABI + Lean REPL + optional rules model)`
+
+0. Deliverables
+
+* `lean/CrafterLean/` Lake project implementing:
+
+  * `Crafter.Oracle` (ground-truth engine; deterministic; “step”)
+  * `Crafter.Render` (render-to-string; no terminal IO)
+  * `Crafter.Trace` (record/replay; JSON export)
+  * `Crafter.REPL` (Lean-only REPL)
+  * optional `Crafter.Model` in the `lean-worlds` style (`Rules` + `OracleRules`)
+* `ffi/` C shim exposing a plain C ABI (no `lean_object*` leaks), compiled as a shared library that Rust can link/dlopen.
+* `crafter-tui` integration mode that swaps its backend to call the C ABI.
+
+1. Goals
+
+* Feature-parity with your `src_modular` oracle engine semantics.
+* Deterministic and replayable:
+
+  * same `(config, seed, action_seq)` => same trace bytes.
+* Fast-enough for research:
+
+  * avoid pathological allocations in `step`.
+* ABI stability:
+
+  * C ABI returns byte buffers and opaque handles; versioned schema.
+* “Lean-native correctness hooks”:
+
+  * invariants as theorems (optional) + cheap runtime asserts (always).
+* Optional: `lean-worlds`-style symbolic model learning + comparison metrics.
+
+2. Non-goals
+
+* Rebuilding a full web server in Lean.
+* Proving full semantic equivalence to Rust oracle (you can do differential testing instead).
+* Making the Rust TUI depend on Lean runtime internals directly (the shim isolates this).
+
+3. Repository layout
+
+```text
+repo/
+  src_modular/                (existing Rust oracle + modularization baseline)
+  crafter-tui/                (existing UI)
+  lean/
+    CrafterLean/
+      lakefile.lean
+      lean-toolchain
+      Crafter/
+        Prelude.lean
+        Config.lean
+        Action.lean
+        Types/                (small shared types; coords; ids; rng; bounds)
+          Coord.lean
+          RNG.lean
+          Grid.lean
+          Id.lean
+        Features/             (mirror src_modular “folder per feature”)
+          World/              (terrain, generation, materials)
+            Types.lean
+            Gen.lean
+            Update.lean
+          Entities/
+            Types.lean
+            Spawn.lean
+            Update.lean
+          Player/
+            Types.lean
+            Update.lean
+          Mobs/
+          Combat/
+          Crafting/
+          Furnace/
+          Inventory/
+          Achievements/
+          Time/
+        Oracle/
+          State.lean          (authoritative full state)
+          Step.lean           (step pipeline; order is the spec)
+          Invariants.lean     (runtime checks + optional theorems)
+          Obs.lean            (observation projection)
+          Delta.lean          (delta extraction for scoring)
+        Render/
+          Ascii.lean          (render-to-string)
+        Trace/
+          Types.lean
+          Record.lean
+          Replay.lean
+          Json.lean
+        Model/                (optional: lean-worlds pattern)
+          Rules.lean
+          OracleRules.lean
+          Fitness.lean
+        REPL.lean
+        FFI/
+          Exports.lean        (Lean functions marked `@[export]`)
+  ffi/
+    crafter_lean_shim.c       (C ABI shim: alloc/copy/free buffers)
+    crafter_lean_shim.h
+    build.rs / Makefile       (build shared lib + link Lean objects)
+```
+
+4. Core API (Lean)
+   4.1 Types
+
+* `Config`: mirrors your config schema; defaultable.
+* `Action`: exact action enum you already use (movement, interact, craft, etc.).
+* `OracleState`: full state, includes RNG, tick counters, inventories, world grid, entity tables.
+* `Observation`: what UI/agents see; define one canonical view first (you can add variants later).
+* `StepOut`:
+
+  * `obs : Observation`
+  * `reward : Float`
+  * `done : Bool`
+  * `info : Json` (or structured `Info` that can be JSON-encoded)
+  * `delta : Delta` (tile/entity/inventory diffs for scoring + render optimization)
+
+4.2 Functions
+
+* `Oracle.new (cfg : Config) (seed : UInt64) : OracleState`
+* `Oracle.step (s : OracleState) (a : Action) : OracleState × StepOut`
+* `Oracle.renderAscii (s : OracleState) : String`
+* `Oracle.save (s : OracleState) : ByteArray` (stable format, versioned)
+* `Oracle.load (b : ByteArray) : Except String OracleState`
+
+5. `step` pipeline (the contract)
+   Your “oracle” is defined by this exact ordering. Put it in `Crafter/Oracle/Step.lean` as the single source of truth.
+
+Example (adjust to match your existing semantics):
+
+1. `applyPlayerIntent` (movement intent, action intent)
+2. `resolveMovement` (collisions, bounds, tile effects)
+3. `resolveInteractions` (mine/place/craft/open furnace/attack trigger)
+4. `updateProjectiles`
+5. `updateMobsAI` (choose intents)
+6. `resolveCombat` (damage, knockback, drops)
+7. `updateWorld` (day/night, hunger, regen, hazards)
+8. `updateAchievements`
+9. `computeRewardDoneInfo`
+10. `projectObservation` + `computeDelta`
+11. `recordTraceEvent` (if enabled)
+
+Hard requirements:
+
+* RNG is explicit: `OracleState` carries RNG; every randomness consumes from it.
+* No IO in core: everything pure except the REPL module.
+
+6. Invariants (Lean value-add)
+   6.1 Always-on runtime invariants (`Oracle/Invariants.lean`)
+   Implement `check : OracleState → Except String Unit` with cheap checks:
+
+* bounds: all entity coords in grid
+* counts: inventories nonnegative
+* hp within `[0, max]`
+* no invalid tile ids
+  Call `check` in debug builds, and optionally sample-check in release.
+
+6.2 Optional proofs (incremental)
+Add theorems that the step pipeline preserves invariants:
+
+* `theorem inv_preserved : Inv s → Inv (step s a).1`
+  Start with the easiest ones (nonnegativity/bounds) to prove the pipeline structure works.
+
+7. Optional: `lean-worlds`-style `Rules` vs `OracleRules`
+   Mirror the repo pattern:
+
+* `Crafter/Model/Rules.lean`: the candidate symbolic model (rule set + precedence).
+* `Crafter/Model/OracleRules.lean`: adapter that “wraps” `Crafter.Oracle.step` as an oracle model for comparison. This matches `lean-worlds`’ separation. ([GitHub][1])
+* `Crafter/Model/Fitness.lean`: scoring:
+
+  * descriptive: delta-F1 over changed tiles/entities/inventory
+  * reward/done accuracy
+  * pragmatic (optional): plan in model for `H` steps, execute first action in oracle, measure return
+
+8. Lean-only REPL (`Crafter/REPL.lean`)
+   Two modes:
+
+* Line REPL (required):
+
+  * commands: `new`, `seed`, `step`, `run n`, `render`, `save`, `load`, `trace on|off`, `quit`
+* Raw-key loop (optional later):
+
+  * can be added, but keep it out of the core; if you do it, do it as a small helper layer.
+
+9. C ABI for Rust TUI embedding (recommended approach)
+   Lean can export functions to C using `@[export sym]`, but you don’t want Rust to manipulate `lean_object*` or Lean `ByteArray` directly. Instead:
+
+9.1 Export “Lean ABI” functions (Lean side)
+
+* In `Crafter/FFI/Exports.lean`, expose minimal functions in IO that operate on a handle table:
+
+  * `@[export crafter_lean_init]` initialize global state (handle table)
+  * `@[export crafter_lean_new]` `(cfgBytes : ByteArray) (seed : UInt64) : UInt64`
+  * `@[export crafter_lean_step]` `(h : UInt64) (action : UInt32) : ByteArray`
+  * `@[export crafter_lean_render]` `(h : UInt64) : ByteArray` (UTF-8)
+  * `@[export crafter_lean_save]` `(h : UInt64) : ByteArray`
+  * `@[export crafter_lean_load]` `(stateBytes : ByteArray) : UInt64`
+  * `@[export crafter_lean_free]` `(h : UInt64) : Unit`
+    Lean’s FFI/ABI is designed for this export pattern. ([Lean Language][2])
+
+9.2 Plain C ABI shim (C side, stable surface)
+Write `ffi/crafter_lean_shim.c` that:
+
+* calls Lean module initializer exactly once (Lean requires initialization before exported defs are usable) ([Lean Language][2])
+* calls the exported Lean functions
+* converts Lean `ByteArray` into `malloc`-owned `uint8_t*` buffers
+* exposes a tiny stable API to Rust:
+
+`crafter_lean_shim.h`:
+
+```c
+typedef struct { const uint8_t* ptr; size_t len; } CrafterBuf;
+
+uint32_t crafter_version(void);
+
+int crafter_init(void);
+
+uint64_t crafter_new_session(const uint8_t* cfg, size_t cfg_len, uint64_t seed);
+
+int crafter_step(uint64_t h, uint32_t action, CrafterBuf* out_json);
+int crafter_render(uint64_t h, CrafterBuf* out_utf8);
+
+int crafter_save(uint64_t h, CrafterBuf* out_state);
+uint64_t crafter_load_session(const uint8_t* state, size_t state_len);
+
+void crafter_free_session(uint64_t h);
+
+void crafter_buf_free(CrafterBuf buf);
+```
+
+This keeps Rust TUI totally insulated from Lean runtime types.
+
+10. Rust TUI integration
+
+* Add a backend trait in `crafter-tui`:
+
+  * `fn step(action) -> StepOut` and `fn render() -> String`
+* Implement two backends:
+
+  * `RustOracleBackend` (current)
+  * `LeanOracleBackend` (calls C ABI; JSON decode of `StepOut`)
+* Add a runtime flag/env var to choose backend.
+
+11. Serialization formats (versioned)
+
+* `Config` JSON schema: keep as-is.
+* `StepOut` JSON: stable keys; include `schema_version`.
+* `SaveState` bytes:
+
+  * either JSON (easiest) or a compact custom binary (faster)
+  * include `state_version` + `config_hash` for safety.
+
+12. Test plan (how you ensure the Lean oracle matches existing semantics)
+
+* Golden traces from your existing Rust oracle:
+
+  * record `(cfg, seed, action_seq)` and expected `(reward, done, obs_hash, delta_hash)` per step
+* Lean oracle must match on those trace fixtures.
+* Add “differential minimization” helper:
+
+  * if mismatch occurs at step `t`, binary search shortest action prefix that triggers mismatch; store as regression.
+
+13. Migration plan (fastest path)
+
+1) Port pure data + enums (`Config`, `Action`, materials) first.
+2) Port `World` grid + RNG + movement.
+3) Port inventory/crafting.
+4) Port mobs/combat.
+5) Port renderer-to-string.
+6) Add trace record/replay.
+7) Add C ABI shim + wire Rust TUI.
+8) Optional: add `Rules/OracleRules/Fitness` modules to start doing model-learning comparisons.
+
+Key references used
+
+* `lean-worlds` module split (`Rules.lean`, `OracleRules.lean`, `REPL.lean`). ([GitHub][1])
+* Lean 4 FFI / `export` mechanism and ABI expectations. ([Lean Language][2])
+
+If you paste the actual `src_modular` tree (or just the top-level module list), I’ll map it 1:1 into the `Crafter/Features/*` namespaces and pin the exact `step` ordering to match your current implementation.
+
+[1]: https://github.com/Kripner/lean-worlds "https://github.com/Kripner/lean-worlds"
+[2]: https://lean-lang.org/doc/reference/latest/Run-Time-Code/Foreign-Function-Interface/ "https://lean-lang.org/doc/reference/latest/Run-Time-Code/Foreign-Function-Interface/"
+`Cross-language test plan (Rust oracle + Lean oracle + REPL + C ABI)`
+
+`0) Core idea`
+Use one shared fixture format (config + seed + action stream + expected per-step outputs), and run it through three executors:
+
+* `rust-direct` (calls Rust core directly)
+* `lean-direct` (calls Lean core directly)
+* `lean-via-ffi` (Rust test binary calls Lean through the C ABI)
+  All three produce the same normalized “step transcript” so diffs are trivial.
+
+`1) Shared fixture format`
+Put fixtures in `tests/fixtures/` and treat them as the contract.
+
+`1.1) Input fixture`
+`tests/fixtures/<name>.json`:
+
+* `schema_version`
+* `config` (canonical JSON)
+* `seed` (u64)
+* `actions` (array of u32 action ids)
+* optional: `max_steps` (if you want truncation)
+
+`1.2) Expected transcript (golden)`
+`tests/fixtures/<name>.steps.jsonl` (one JSON object per line):
+
+* `t` (step index)
+* `action`
+* `reward`
+* `done`
+* `obs_hash`
+* `delta_hash`
+* optional: `info_subset` (only stable keys)
+  This keeps goldens small and stable; you don’t need full obs/state equality.
+
+`1.3) Canonical hashing rules`
+Define one canonical hash scheme for both languages:
+
+* `obs_hash = blake3(canonical_json(obs))`
+* `delta_hash = blake3(canonical_json(delta))`
+  Canonical JSON rules:
+* stable key ordering
+* no floats with excessive precision (quantize reward if needed, e.g. `round_to_1e-6`)
+* omit volatile fields (timestamps, debug counters)
+
+`2) Executors`
+`2.1) Rust direct executor`
+A small binary or test helper that:
+
+* loads fixture json
+* runs Rust core `reset(seed,cfg)` then steps actions
+* emits JSONL transcript with hashes
+* compares to `<name>.steps.jsonl`
+
+`2.2) Lean direct executor`
+A Lean executable `lean/CrafterLean/Tests/Replayer.lean` that:
+
+* reads the same fixture json
+* runs Lean `Oracle.new/step`
+* emits the same JSONL transcript
+* compares to expected transcript (or writes an “actual” file for diffing)
+
+`2.3) Lean via FFI executor (Rust test)`
+A Rust integration test that:
+
+* links/dlopens the C ABI
+* drives sessions via `crafter_new_session`, `crafter_step`, etc.
+* parses returned JSON (or uses returned obs/delta already hashed if you expose that)
+* emits transcript and compares to the same golden
+  This is the most important “end-to-end” test for TUI integration.
+
+`3) REPL-based tests (works for both Rust and Lean REPLs)`
+Make both REPLs support a `--script` mode:
+
+* reads commands from stdin (or a file)
+* prints machine-readable JSONL events to stdout (no pretty rendering unless requested)
+
+`3.1) Script format`
+`tests/repl_scripts/<name>.repl` (plain text commands):
+
+* `new <fixture.json>`
+* `step` (or `step w`)
+* `run 100`
+* `render_hash` (hash of rendered string)
+* `save tmp.state`
+* `load tmp.state`
+* `quit`
+
+`3.2) Expected output`
+`tests/repl_scripts/<name>.out.jsonl`:
+
+* `event` (`reset`, `step`, `render`, `save`, `load`, `done`)
+* `t`
+* `reward/done`
+* `obs_hash/delta_hash`
+* `render_hash` when applicable
+
+Now you can run:
+
+* `rust-repl --script < file.repl` and compare JSONL
+* `lean-repl --script < file.repl` and compare JSONL
+  Same scripts, same expectations.
+
+`4) Test suites to implement`
+`4.1) Conformance (“golden trace”) suite`
+Start with ~10 fixtures, each focused:
+
+* `smoke_move` (movement + boundaries)
+* `mine_and_pickup` (tile change + inventory)
+* `craft_basic` (crafting rules)
+* `combat_one_mob` (damage + drops)
+* `hunger_day_night` (time + regen/hunger)
+* `episode_done` (death or goal completion)
+  These should be short (50–300 steps) and deterministic.
+
+`4.2) Save/load roundtrip suite`
+For each fixture:
+
+* run N steps
+* `save_state`
+* `load_state`
+* continue steps
+* transcript must match the uninterrupted baseline
+  Run for:
+* Rust direct
+* Lean direct
+* Lean via FFI
+
+`4.3) Renderer stability suite`
+Because renderer differences are common across ports, test the hash:
+
+* at specific step indices, call `render_ascii`
+* compare `render_hash`
+  Keep these on a small set of snapshots (e.g. steps `0, 1, 10, 50`).
+
+`4.4) Invariant/property suite`
+These don’t need goldens; they assert safety:
+
+* no panic/crash for random action sequences length `K`
+* invariants hold after each step (bounds, nonnegative inventory, hp range)
+  Do this in:
+* Rust core tests
+* Lean core tests
+  Also share a corpus: `tests/fuzz_corpus/` of action streams that previously found bugs.
+
+`4.5) Differential “minimizer” helper`
+When Rust vs Lean mismatch:
+
+* automatically bisect to smallest action prefix that reproduces
+* write a new fixture `reg_<hash>.json` + expected `.steps.jsonl`
+  This makes regressions easy to lock in.
+
+`5) CI wiring`
+Run in CI:
+
+* `cargo test` (includes `lean-via-ffi` tests)
+* `lake build` + `lake exe replayer -- --all-fixtures`
+* REPL script tests (both binaries), compare JSONL
+
+`6) Minimal implementation knobs (so tests don’t churn)`
+
+* define one stable `Action` numeric mapping and never change it without bumping `schema_version`
+* define one stable `Observation` JSON schema subset used for hashing
+* quantize floats (reward) before hashing
+
+If you want, I can draft the exact `fixture.json` and `steps.jsonl` schemas (field-by-field) plus the “canonical JSON + blake3” normalization rules so Rust and Lean will match byte-for-byte.

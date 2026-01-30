@@ -1,0 +1,13 @@
+name = "CrafterLean"
+version = "0.1.0"
+defaultTargets = ["crafterlean"]
+
+[[lean_lib]]
+name = "CrafterLean"
+
+[[lean_lib]]
+name = "CrafterLeanTests"
+
+[[lean_exe]]
+name = "crafterlean"
+root = "Main"

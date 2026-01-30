@@ -1,0 +1,20 @@
+# Lean build artifacts
+.lake/
+lake-packages/
+*.olean
+*.ilean
+*.trace
+*.hash
+
+# Rust build artifacts
+target/
+
+# Editor
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Environment
+.env
+.env.local
