@@ -21,7 +21,7 @@ A web-playable Crafter game built entirely in **Lean 4**, served via the [Lithe]
 ```bash
 # Clone lithe as sibling (if not already)
 cd /path/to/parent
-git clone https://github.com/joshpurtell/lithe.git
+git clone https://github.com/JoshuaPurtell/lithe.git
 
 # Build Lean code
 cd lean-crafter/lithe

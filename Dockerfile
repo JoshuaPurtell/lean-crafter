@@ -24,7 +24,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /build
 
 # Clone lithe framework (sibling directory expected by build.rs)
-RUN git clone --depth 1 https://github.com/joshpurtell/lithe.git /build/lithe
+RUN git clone --depth 1 https://github.com/JoshuaPurtell/lithe.git /build/lithe
 
 # Copy lean-crafter source
 COPY . /build/lean-crafter
